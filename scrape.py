@@ -1,60 +1,89 @@
 import requests
-import json
 import time
+import threading
+import json
+from queue import Queue
 
-BASE_URL = "http://35.200.185.69:8000"
-VERSIONS = ["v1", "v2", "v3"]
-MAX_REQUESTS = 100
-COLLECTED_NAMES = {"v1": set(), "v2": set(), "v3": set()}
-REQUEST_COUNTS = {"v1": 0, "v2": 0, "v3": 0}
+API_URL = "http://35.200.185.69:8000/v1/autocomplete?query="  # Change v1, v2, v3 as needed
 
+collected_names = set()
+searched_prefixes = set()
+queue = Queue()
 
-def fetch_names(version, query):
-    url = f"{BASE_URL}/{version}/autocomplete?query={query}"
-    response = requests.get(url)
-    REQUEST_COUNTS[version] += 1
-    if response.status_code == 200:
+for letter in "abcdefghijklmnopqrstuvwxyz":
+    queue.put(letter)
+
+request_count = 0
+names_pulled_count = 0
+INITIAL_CONCURRENCY = 3
+concurrency_limit = INITIAL_CONCURRENCY
+lock = threading.Lock()
+
+def delay(ms):
+    time.sleep(ms / 1000)
+
+def fetch_names(prefix, attempt=1):
+    global request_count, names_pulled_count
+
+    if prefix in searched_prefixes:
+        return
+    searched_prefixes.add(prefix)
+
+    try:
+        with lock:
+            request_count += 1
+        response = requests.get(API_URL + prefix, timeout=5)
+
+        if response.status_code == 429:
+            wait_time = min(500 * attempt, 6000)
+            print(f"Rate limited on: {prefix}. Retrying in {wait_time / 1000}s...")
+            delay(wait_time)
+            return fetch_names(prefix, attempt + 1)
+
+        response.raise_for_status()
         data = response.json()
-        return set(data.get("results", []))
-    return set()
+        new_names = []
 
+        if "results" in data:
+            for name in data["results"]:
+                if name not in collected_names and len(name) > len(prefix):
+                    with lock:
+                        collected_names.add(name)
+                        names_pulled_count += 1
+                    new_names.append(name)
 
-def expand_prefixes(version, prefix, depth=2):
-    queue = [prefix]
-    visited = set()
+        if len(new_names) >= 5:
+            for name in new_names:
+                queue.put(name[:len(prefix) + 1])
 
-    while queue and REQUEST_COUNTS[version] < MAX_REQUESTS:
-        current_prefix = queue.pop(0)
-        if current_prefix in visited:
-            continue
-        visited.add(current_prefix)
+    except requests.RequestException as error:
+        print(f"Error fetching {prefix}: {error}")
 
-        names = fetch_names(version, current_prefix)
-        new_names = names - COLLECTED_NAMES[version]
-        COLLECTED_NAMES[version].update(new_names)
+def save_names_to_file():
+    with open("collected_names.json", "w", encoding="utf-8") as f:
+        json.dump(sorted(collected_names), f, indent=4)
+    print("\n✅ Names saved to collected_names.json")
 
-        if len(names) == 10:  # Assuming API returns a max of 10 results
-            for char in "abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+":
-                new_prefix = current_prefix + char
-                if new_prefix not in visited:
-                    queue.append(new_prefix)
+def discover_names():
+    while not queue.empty():
+        batch = [queue.get() for _ in range(min(concurrency_limit, queue.qsize()))]
+        print(f"Fetching names for: {batch}")
 
+        threads = []
+        for prefix in batch:
+            thread = threading.Thread(target=fetch_names, args=(prefix,))
+            thread.start()
+            threads.append(thread)
 
-def main():
-    for version in VERSIONS:
-        expand_prefixes(version, "", depth=3)
+        for thread in threads:
+            thread.join()
 
-    with open("collected_names.json", "w") as f:
-        json.dump({k: list(v) for k, v in COLLECTED_NAMES.items()}, f, indent=4)
+        delay(300)
 
-    print("Total names collected:")
-    for version in VERSIONS:
-        print(f"{version}: {len(COLLECTED_NAMES[version])}")
-
-    print("\nTotal requests made:")
-    for version in VERSIONS:
-        print(f"{version}: {REQUEST_COUNTS[version]}")
-
+    save_names_to_file()
+    print(f"\n🚀 Extraction Complete!")
+    print(f"📌 Total names collected: {len(collected_names)}")
+    print(f"🔄 Total requests made: {request_count}")
 
 if __name__ == "__main__":
-    main()
+    discover_names()
