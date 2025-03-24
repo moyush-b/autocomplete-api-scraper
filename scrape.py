@@ -1,58 +1,60 @@
 import requests
 import json
 import time
-from collections import deque
 
-def fetch_names(version, prefix, seen_names, base_url, request_count):
-    url = f"{base_url}/{version}/autocomplete?query={prefix}"
+BASE_URL = "http://35.200.185.69:8000"
+VERSIONS = ["v1", "v2", "v3"]
+MAX_REQUESTS = 100
+COLLECTED_NAMES = {"v1": set(), "v2": set(), "v3": set()}
+REQUEST_COUNTS = {"v1": 0, "v2": 0, "v3": 0}
+
+
+def fetch_names(version, query):
+    url = f"{BASE_URL}/{version}/autocomplete?query={query}"
     response = requests.get(url)
-    request_count[version] += 1
-    
-    if response.status_code != 200:
-        return []
-    
-    data = response.json()
-    new_names = data.get("results", [])
-    
-    unique_new_names = [name for name in new_names if name not in seen_names]
-    seen_names.update(unique_new_names)
-    return unique_new_names
+    REQUEST_COUNTS[version] += 1
+    if response.status_code == 200:
+        data = response.json()
+        return set(data.get("results", []))
+    return set()
 
-def extract_all_names(version, base_url):
-    seen_names = set()
-    queue = deque([chr(i) for i in range(97, 123)])  # Start with 'a' to 'z'
-    request_count = {"v1": 0, "v2": 0, "v3": 0}
-    
-    while queue:
-        prefix = queue.popleft()
-        new_names = fetch_names(version, prefix, seen_names, base_url, request_count)
-        
-        for name in new_names:
-            if len(name) > len(prefix):  # Expand further
-                queue.append(name)
-    
-    return seen_names, request_count[version]
+
+def expand_prefixes(version, prefix, depth=2):
+    queue = [prefix]
+    visited = set()
+
+    while queue and REQUEST_COUNTS[version] < MAX_REQUESTS:
+        current_prefix = queue.pop(0)
+        if current_prefix in visited:
+            continue
+        visited.add(current_prefix)
+
+        names = fetch_names(version, current_prefix)
+        new_names = names - COLLECTED_NAMES[version]
+        COLLECTED_NAMES[version].update(new_names)
+
+        if len(names) == 10:  # Assuming API returns a max of 10 results
+            for char in "abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+":
+                new_prefix = current_prefix + char
+                if new_prefix not in visited:
+                    queue.append(new_prefix)
+
 
 def main():
-    base_url = "http://35.200.185.69:8000"
-    all_results = {}
-    total_requests = {}
-    
-    for version in ["v1", "v2", "v3"]:
-        names, request_count = extract_all_names(version, base_url)
-        all_results[version] = list(names)
-        total_requests[version] = request_count
-    
-    print("Total names collected:")
-    for version in all_results:
-        print(f"{version}: {len(all_results[version])}")
-    
-    print("Total requests made:")
-    for version in total_requests:
-        print(f"{version}: {total_requests[version]}")
-    
+    for version in VERSIONS:
+        expand_prefixes(version, "", depth=3)
+
     with open("collected_names.json", "w") as f:
-        json.dump(all_results, f, indent=4)
-    
+        json.dump({k: list(v) for k, v in COLLECTED_NAMES.items()}, f, indent=4)
+
+    print("Total names collected:")
+    for version in VERSIONS:
+        print(f"{version}: {len(COLLECTED_NAMES[version])}")
+
+    print("\nTotal requests made:")
+    for version in VERSIONS:
+        print(f"{version}: {REQUEST_COUNTS[version]}")
+
+
 if __name__ == "__main__":
     main()
