@@ -1,57 +1,58 @@
 import requests
-import time
 import json
+import time
+from collections import deque
 
-def fetch_names(api_version, query, seen_names, total_requests):
-    url = f"http://35.200.185.69:8000/{api_version}/autocomplete?query={query}"
+def fetch_names(version, prefix, seen_names, base_url, request_count):
+    url = f"{base_url}/{version}/autocomplete?query={prefix}"
     response = requests.get(url)
-    total_requests[api_version] += 1
+    request_count[version] += 1
     
     if response.status_code != 200:
-        print(f"Error: {response.status_code} for {query} in {api_version}")
         return []
     
-    try:
-        data = response.json()
-        return [name for name in data.get("results", []) if name not in seen_names]
-    except json.JSONDecodeError:
-        print("Failed to parse JSON response")
-        return []
+    data = response.json()
+    new_names = data.get("results", [])
+    
+    unique_new_names = [name for name in new_names if name not in seen_names]
+    seen_names.update(unique_new_names)
+    return unique_new_names
 
-def extract_all_names():
-    versions = ["v1", "v2", "v3"]
-    seen_names = {v: set() for v in versions}
-    total_requests = {v: 0 for v in versions}
-    queue = {v: [""] for v in versions}  # Start with an empty query
+def extract_all_names(version, base_url):
+    seen_names = set()
+    queue = deque([chr(i) for i in range(97, 123)])  # Start with 'a' to 'z'
+    request_count = {"v1": 0, "v2": 0, "v3": 0}
     
-    while any(queue.values()):
-        for v in versions:
-            if not queue[v]:
-                continue
-            
-            query = queue[v].pop(0)
-            new_names = fetch_names(v, query, seen_names[v], total_requests)
-            
-            for name in new_names:
-                if name not in seen_names[v]:
-                    seen_names[v].add(name)
-                    queue[v].append(name)  # Use names as new queries for deeper discovery
-            
-            time.sleep(0.1)  # Prevent hitting rate limits
+    while queue:
+        prefix = queue.popleft()
+        new_names = fetch_names(version, prefix, seen_names, base_url, request_count)
+        
+        for name in new_names:
+            if len(name) > len(prefix):  # Expand further
+                queue.append(name)
     
-    return seen_names, total_requests
+    return seen_names, request_count[version]
 
 def main():
-    all_names, requests_made = extract_all_names()
+    base_url = "http://35.200.185.69:8000"
+    all_results = {}
+    total_requests = {}
     
-    for v in all_names:
-        print(f"Total names collected in {v}: {len(all_names[v])}")
+    for version in ["v1", "v2", "v3"]:
+        names, request_count = extract_all_names(version, base_url)
+        all_results[version] = list(names)
+        total_requests[version] = request_count
     
-    for v in requests_made:
-        print(f"Total requests made to {v}: {requests_made[v]}")
+    print("Total names collected:")
+    for version in all_results:
+        print(f"{version}: {len(all_results[version])}")
     
-    with open("extracted_names.json", "w") as f:
-        json.dump(all_names, f, indent=4)
-
+    print("Total requests made:")
+    for version in total_requests:
+        print(f"{version}: {total_requests[version]}")
+    
+    with open("collected_names.json", "w") as f:
+        json.dump(all_results, f, indent=4)
+    
 if __name__ == "__main__":
     main()
